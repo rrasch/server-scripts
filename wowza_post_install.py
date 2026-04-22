@@ -302,11 +302,16 @@ def start_test_stream():
         "rtmp://publish:publish@127.0.0.1/live/test",
     ]
 
+    env = os.environ.copy()
+    env["PATH"] = "/usr/local/bin:" + env["PATH"]
+
     print("Starting FFmpeg test stream...")
     print(" ".join(cmd))
+    print(env["PATH"])
 
     return subprocess.Popen(
         cmd,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
