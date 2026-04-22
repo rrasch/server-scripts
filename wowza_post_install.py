@@ -8,7 +8,8 @@ import socket
 import subprocess
 import time
 
-WOWZA_USER = "wowza"
+WOWZA_USER = "ams"
+WOWZA_ADMIN_USER = "dltsadmin"
 WOWZA_DIR = "/usr/local/WowzaStreamingEngine"
 SYSTEMD_DIR = "/etc/systemd/system"
 
@@ -56,7 +57,7 @@ def install_service(name, path):
     os.symlink(path, target)
 
 
-def wowza_user_exists(username="wowza"):
+def wowza_user_exists(username=WOWZA_USER):
     try:
         pwd.getpwnam(username)
         return True
@@ -201,7 +202,7 @@ def create_admin_user():
     print("Admin user created successfully.")
 
 
-def ensure_wowza_nofile_limits(user="wowza", limit=20000):
+def ensure_wowza_nofile_limits(user=WOWZA_USER, limit=20000):
     """
     Ensures Wowza file descriptor limits exist via limits.d drop-in file.
     """
@@ -370,7 +371,7 @@ def main():
 
     if not wowza_user_exists():
         raise RuntimeError(
-            "Required system user 'wowza' does not exist. "
+            f"Required system user '{WOWZA_USER}' does not exist. "
             "Create it before running bootstrap."
         )
 
