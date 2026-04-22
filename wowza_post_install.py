@@ -152,7 +152,7 @@ def install_lsb_release():
     )
 
 
-def admin_user_exists(password_file, username="admin"):
+def admin_user_exists(password_file, username=WOWZA_ADMIN_USER):
     """
     Checks whether a user exists in admin.password file.
     """
@@ -179,7 +179,7 @@ def create_admin_user():
         raise RuntimeError(f"admin.password file not found: {password_file}")
 
     # Idempotency check
-    if admin_user_exists(password_file, "admin"):
+    if admin_user_exists(password_file, WOWZA_ADMIN_USER):
         print("Admin user already exists, skipping creation.")
         return
 
@@ -193,7 +193,7 @@ def create_admin_user():
         tool_path,
         "-f", password_file,
         "--addUser",
-        "--userName", "admin",
+        "--userName", WOWZA_ADMIN_USER,
         "--password", password,
         "--groups", "admin,advUser",
         "--passwordEncoding", "bcrypt"
