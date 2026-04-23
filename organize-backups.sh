@@ -52,9 +52,9 @@ if [ "$DAY_OF_WEEK" = "0" ]; then
 fi
 
 # If this is first of month, hard link daily backup
-# to montly backup directory
+# to monthly backup directory
 if [ "$DAY_OF_MONTH" = "01" ]; then
-	cp -l $DAILY_DIR/mysql.$HOST*$DATE.sql.bz2 $MONTLY_DIR
+	cp -l $DAILY_DIR/mysql.$HOST*$DATE.sql.bz2 $MONTHLY_DIR
 fi
 
 # Now clean up old backs from daily, weekly, and monthly
