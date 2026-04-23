@@ -1,5 +1,9 @@
 #!/usr/bin/python3
 
+# ---------------------------
+# imports
+# ---------------------------
+
 import os
 import pwd
 import requests
@@ -13,9 +17,14 @@ from getpass import getpass
 from pprint import pprint
 
 
+# ---------------------------
+# constants
+# ---------------------------
+
 WOWZA_USER = "ams"
 WOWZA_ADMIN_USER = "dltsadmin"
 WOWZA_PUBLISH_USER = "dltspublish"
+
 WOWZA_DIR = "/usr/local/WowzaStreamingEngine"
 WOWZA_CONTENT_DIR = "/data/adobe/ams/content"
 SYSTEMD_DIR = "/etc/systemd/system"
@@ -32,118 +41,44 @@ EXPECTED_PORTS = [1935, 8088]
 API_URL = "http://localhost:8087/v2/servers/_defaultServer_/tune"
 API_HEADERS = {
     "Accept": "application/json; charset=utf-8",
-    "Content-Type": "application/json; charset=utf-8"
+    "Content-Type": "application/json; charset=utf-8",
 }
 
+
 # ---------------------------
-# helpers
+# general helpers
 # ---------------------------
+
 
 def run(cmd):
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 
-def find_services():
-    found = {}
-
-    for root, _, files in os.walk(WOWZA_DIR):
-        for f in files:
-            if f.endswith(".service"):
-                found[f] = os.path.join(root, f)
-
-    return found
-
-
-def install_service(name, path):
-    target = os.path.join(SYSTEMD_DIR, name)
-
-    if not os.path.exists(path):
-        raise RuntimeError(f"Missing service file on disk: {path}")
-
-    if os.path.exists(target):
-        print(f"Already installed: {name}")
-        return
-
-    print(f"Installing: {name}")
-    os.symlink(path, target)
-
-
-def wowza_user_exists(username=WOWZA_USER):
-    try:
-        pwd.getpwnam(username)
-        return True
-    except KeyError:
-        return False
-
-
-def install_wowza_license():
-    license_path = os.path.join(WOWZA_DIR, "conf", "Server.license")
-
-    # 1. Idempotent check
-    if os.path.exists(license_path):
-        print("License file already exists, skipping.")
-        return
-
-    # 2. Env var first
-    license_key = os.getenv("WOWZA_LICENSE_KEY")
-
-    # 3. Fallback to input
-    if not license_key:
-        license_key = input("Enter Wowza license key: ").strip()
-
-    if not license_key:
-        raise RuntimeError("No license key provided")
-
-    # 4. Write file
-    print("Writing license file...")
-
-    with open(license_path, "w") as f:
-        f.write(license_key + "\n")
-
-    os.chmod(license_path, 0o600)
-
-    print(f"License installed at {license_path}")
-
-
-def set_wowza_ownership():
-    print(f"Setting ownership of {WOWZA_DIR} to {WOWZA_USER}:{WOWZA_USER}")
-
-    subprocess.run([
-        "chown",
-        "-R",
-        "-H",
-        f"{WOWZA_USER}:{WOWZA_USER}",
-        WOWZA_DIR
-    ], check=True)
-
-
-def create_systemd_override(service_name):
-    override_dir = os.path.join(
-        SYSTEMD_DIR,
-        service_name + ".d"
-    )
-
-    override_file = os.path.join(override_dir, "override.conf")
-
-    print(f"Creating systemd override for {service_name}")
-
-    os.makedirs(override_dir, exist_ok=True)
-
-    with open(override_file, "w") as f:
-        f.write(
-            "[Service]\n"
-            f"User={WOWZA_USER}\n"
-            f"Group={WOWZA_USER}\n"
-            "LimitNOFILE=20000\n"
-        )
-
-    subprocess.run(["systemctl", "daemon-reload"], check=True)
-
-
 def require_root():
     if os.geteuid() != 0:
         raise RuntimeError("This script must be run as root (use sudo)")
+
+
+def drop_privileges(user_name="nobody"):
+    if os.getuid() != 0:
+        return  # Already running as non-root
+
+    # Get the UID/GID for the specified user
+    user_info = pwd.getpwnam(user_name)
+
+    # 1. Set the process group ID
+    os.setgid(user_info.pw_gid)
+    # 2. Set the process user ID
+    os.setuid(user_info.pw_uid)
+
+    # Optional: Update environment variables like HOME
+    os.environ["HOME"] = user_info.pw_dir
+
+
+# ---------------------------
+# system / packages
+# ---------------------------
 
 
 def install_lsb_release():
@@ -157,10 +92,41 @@ def install_lsb_release():
 
     print("Installing lsb_release...")
 
-    subprocess.run(
-        ["dnf", "install", "-y", "lsb_release"],
-        check=True
-    )
+    subprocess.run(["dnf", "install", "-y", "lsb_release"], check=True)
+
+
+def ensure_wowza_nofile_limits(user=WOWZA_USER, limit=20000):
+    """
+    Ensures Wowza file descriptor limits exist via limits.d drop-in file.
+    """
+
+    if os.path.exists(LIMITS_FILE):
+        print(f"Limits file already exists: {LIMITS_FILE}")
+        return
+
+    print("Creating Wowza limits.d configuration...")
+
+    content = f"{user} soft nofile {limit}\n{user} hard nofile {limit}\n"
+
+    with open(LIMITS_FILE, "w") as f:
+        f.write(content)
+
+    os.chmod(LIMITS_FILE, 0o644)
+
+    print("Limits file created successfully.")
+
+
+# ---------------------------
+# user management
+# ---------------------------
+
+
+def wowza_user_exists(username=WOWZA_USER):
+    try:
+        pwd.getpwnam(username)
+        return True
+    except KeyError:
+        return False
 
 
 def admin_user_exists(password_file, username=WOWZA_ADMIN_USER):
@@ -200,15 +166,23 @@ def create_admin_user():
 
     print("Creating Wowza admin user...")
 
-    subprocess.run([
-        tool_path,
-        "-f", password_file,
-        "--addUser",
-        "--userName", WOWZA_ADMIN_USER,
-        "--password", password,
-        "--groups", "admin,advUser",
-        "--passwordEncoding", "bcrypt"
-    ], check=True)
+    subprocess.run(
+        [
+            tool_path,
+            "-f",
+            password_file,
+            "--addUser",
+            "--userName",
+            WOWZA_ADMIN_USER,
+            "--password",
+            password,
+            "--groups",
+            "admin,advUser",
+            "--passwordEncoding",
+            "bcrypt",
+        ],
+        check=True,
+    )
 
     print("Admin user created successfully.")
 
@@ -254,28 +228,47 @@ def create_publish_user():
     return password
 
 
-def ensure_wowza_nofile_limits(user=WOWZA_USER, limit=20000):
-    """
-    Ensures Wowza file descriptor limits exist via limits.d drop-in file.
-    """
+# ---------------------------
+# wowza configuration
+# ---------------------------
 
-    if os.path.exists(LIMITS_FILE):
-        print(f"Limits file already exists: {LIMITS_FILE}")
+
+def install_wowza_license():
+    license_path = os.path.join(WOWZA_DIR, "conf", "Server.license")
+
+    # 1. Idempotent check
+    if os.path.exists(license_path):
+        print("License file already exists, skipping.")
         return
 
-    print("Creating Wowza limits.d configuration...")
+    # 2. Env var first
+    license_key = os.getenv("WOWZA_LICENSE_KEY")
 
-    content = (
-        f"{user} soft nofile {limit}\n"
-        f"{user} hard nofile {limit}\n"
+    # 3. Fallback to input
+    if not license_key:
+        license_key = input("Enter Wowza license key: ").strip()
+
+    if not license_key:
+        raise RuntimeError("No license key provided")
+
+    # 4. Write file
+    print("Writing license file...")
+
+    with open(license_path, "w") as f:
+        f.write(license_key + "\n")
+
+    os.chmod(license_path, 0o600)
+
+    print(f"License installed at {license_path}")
+
+
+def set_wowza_ownership():
+    print(f"Setting ownership of {WOWZA_DIR} to {WOWZA_USER}:{WOWZA_USER}")
+
+    subprocess.run(
+        ["chown", "-R", "-H", f"{WOWZA_USER}:{WOWZA_USER}", WOWZA_DIR],
+        check=True,
     )
-
-    with open(LIMITS_FILE, "w") as f:
-        f.write(content)
-
-    os.chmod(LIMITS_FILE, 0o644)
-
-    print("Limits file created successfully.")
 
 
 def update_storage_dir():
@@ -368,6 +361,11 @@ def copy_wowza_content():
     print("Content copy completed.")
 
 
+# ---------------------------
+# wowza api / tuning
+# ---------------------------
+
+
 def get_current_tuning():
     """Retrieve current server tuning settings"""
     try:
@@ -395,7 +393,7 @@ def enable_production_mode():
             API_URL,
             auth=("admin", "admin"),
             headers=API_HEADERS,
-            json=payload
+            json=payload,
         )
         response.raise_for_status()
         print("Successfully updated to Production Mode.")
@@ -404,25 +402,55 @@ def enable_production_mode():
         print(f"Error updating settings: {e}")
 
 
-def drop_privileges(user_name="nobody"):
-    if os.getuid() != 0:
-        return  # Already running as non-root
-
-    # Get the UID/GID for the specified user
-    user_info = pwd.getpwnam(user_name)
-
-    # 1. Set the process group ID
-    os.setgid(user_info.pw_gid)
-    # 2. Set the process user ID
-    os.setuid(user_info.pw_uid)
-
-    # Optional: Update environment variables like HOME
-    os.environ["HOME"] = user_info.pw_dir
-
-
 # ---------------------------
 # systemd operations
 # ---------------------------
+
+
+def find_services():
+    found = {}
+
+    for root, _, files in os.walk(WOWZA_DIR):
+        for f in files:
+            if f.endswith(".service"):
+                found[f] = os.path.join(root, f)
+
+    return found
+
+
+def install_service(name, path):
+    target = os.path.join(SYSTEMD_DIR, name)
+
+    if not os.path.exists(path):
+        raise RuntimeError(f"Missing service file on disk: {path}")
+
+    if os.path.exists(target):
+        print(f"Already installed: {name}")
+        return
+
+    print(f"Installing: {name}")
+    os.symlink(path, target)
+
+
+def create_systemd_override(service_name):
+    override_dir = os.path.join(SYSTEMD_DIR, service_name + ".d")
+
+    override_file = os.path.join(override_dir, "override.conf")
+
+    print(f"Creating systemd override for {service_name}")
+
+    os.makedirs(override_dir, exist_ok=True)
+
+    with open(override_file, "w") as f:
+        f.write(
+            "[Service]\n"
+            f"User={WOWZA_USER}\n"
+            f"Group={WOWZA_USER}\n"
+            "LimitNOFILE=20000\n"
+        )
+
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+
 
 def reload_systemd():
     run(["systemctl", "daemon-reload"])
@@ -448,8 +476,9 @@ def is_active(service):
 
 
 # ---------------------------
-# port checks
+# networking / ports
 # ---------------------------
+
 
 def check_port(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -477,6 +506,7 @@ def wait_for_ports(timeout=30):
 # playback readiness
 # ---------------------------
 
+
 def start_test_stream(publish_pass):
     """
     Starts a short FFmpeg test stream to Wowza.
@@ -485,14 +515,22 @@ def start_test_stream(publish_pass):
     cmd = [
         "ffmpeg",
         "-re",
-        "-f", "lavfi",
-        "-i", "testsrc=size=1280x720:rate=30",
-        "-f", "lavfi",
-        "-i", "sine=frequency=1000",
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-t", "20",
-        "-f", "flv",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=1280x720:rate=30",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=1000",
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        "-t",
+        "20",
+        "-f",
+        "flv",
         f"rtmp://{WOWZA_PUBLISH_USER}:{publish_pass}@127.0.0.1/live/test",
     ]
 
@@ -507,21 +545,17 @@ def start_test_stream(publish_pass):
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=True,
     )
 
 
 def check_playback_readiness(
-    host="127.0.0.1",
-    app="live",
-    stream="test",
-    timeout=30
+    host="127.0.0.1", app="live", stream="test", timeout=30
 ):
     """
     Verifies playback readiness via HLS manifest availability.
     """
     url = f"http://{host}:1935/{app}/{stream}/playlist.m3u8"
-    # url = f"http://{host}:1935/vod/mp4:sample.mp4/playlist.m3u8"
 
     print(f"Checking playback readiness: {url}")
 
@@ -573,6 +607,7 @@ def run_playback_test(publish_pass):
 # main flow
 # ---------------------------
 
+
 def main():
     print("\n=== Wowza Bootstrap Starting ===\n")
 
@@ -585,19 +620,12 @@ def main():
         )
 
     install_lsb_release()
-
     ensure_wowza_nofile_limits()
-
     update_storage_dir()
-
     install_wowza_license()
-
     create_admin_user()
-
     publish_pass = create_publish_user()
-
     set_wowza_ownership()
-
     copy_wowza_content()
 
     found = find_services()
@@ -626,14 +654,15 @@ def main():
         print(f"OK: {svc} is active")
 
     drop_privileges()
-
     wait_for_ports()
-
     get_current_tuning()
-
     enable_production_mode()
 
+    # test live streaming using ffmpeg as encoder
     run_playback_test(publish_pass)
+
+    # test video-on-demand streaming
+    check_playback_readiness(app="vod", stream="mp4:sample.mp4")
 
     print("\n=== Wowza Bootstrap Complete ===")
 
