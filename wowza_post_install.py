@@ -10,6 +10,7 @@ import subprocess
 import time
 from datetime import datetime
 from getpass import getpass
+from pprint import pprint
 
 
 WOWZA_USER = "ams"
@@ -28,6 +29,11 @@ EXPECTED_SERVICES = [
 
 EXPECTED_PORTS = [1935, 8088]
 
+API_URL = "http://localhost:8087/v2/servers/_defaultServer_/tune"
+API_HEADERS = {
+    "Accept": "application/json; charset=utf-8",
+    "Content-Type": "application/json; charset=utf-8"
+}
 
 # ---------------------------
 # helpers
@@ -362,6 +368,58 @@ def copy_wowza_content():
     print("Content copy completed.")
 
 
+def get_current_tuning():
+    """Retrieve current server tuning settings"""
+    try:
+        response = requests.get(
+            API_URL,
+            auth=("admin", "admin"),
+            headers=API_HEADERS,
+        )
+        response.raise_for_status()  # Raises an error for bad status codes
+        print("Current Tuning Settings:")
+        pprint(response.json())
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching settings: {e}")
+
+
+def enable_production_mode():
+    """Update server to Production Mode settings"""
+    payload = {
+        "heapSize": "${com.wowza.wms.TuningHeapSizeProduction}",
+        # "garbageCollector": "${com.wowza.wms.TuningGarbageCollectorG1Default}"
+    }
+
+    try:
+        response = requests.put(
+            API_URL,
+            auth=("admin", "admin"),
+            headers=API_HEADERS,
+            json=payload
+        )
+        response.raise_for_status()
+        print("Successfully updated to Production Mode.")
+        pprint(response.json())
+    except requests.exceptions.RequestException as e:
+        print(f"Error updating settings: {e}")
+
+
+def drop_privileges(user_name="nobody"):
+    if os.getuid() != 0:
+        return  # Already running as non-root
+
+    # Get the UID/GID for the specified user
+    user_info = pwd.getpwnam(user_name)
+
+    # 1. Set the process group ID
+    os.setgid(user_info.pw_gid)
+    # 2. Set the process user ID
+    os.setuid(user_info.pw_uid)
+
+    # Optional: Update environment variables like HOME
+    os.environ["HOME"] = user_info.pw_dir
+
+
 # ---------------------------
 # systemd operations
 # ---------------------------
@@ -567,7 +625,13 @@ def main():
             raise RuntimeError(f"Service not active: {svc}")
         print(f"OK: {svc} is active")
 
+    drop_privileges()
+
     wait_for_ports()
+
+    get_current_tuning()
+
+    enable_production_mode()
 
     run_playback_test(publish_pass)
 
