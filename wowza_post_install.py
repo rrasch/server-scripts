@@ -4,13 +4,19 @@ import os
 import pwd
 import requests
 import shutil
+import signal
 import socket
 import subprocess
 import time
+from datetime import datetime
+from getpass import getpass
+
 
 WOWZA_USER = "ams"
 WOWZA_ADMIN_USER = "dltsadmin"
+WOWZA_PUBLISH_USER = "dltspublish"
 WOWZA_DIR = "/usr/local/WowzaStreamingEngine"
+WOWZA_CONTENT_DIR = "/data/adobe/ams/content"
 SYSTEMD_DIR = "/etc/systemd/system"
 
 LIMITS_FILE = "/etc/security/limits.d/99-wowza.conf"
@@ -101,7 +107,6 @@ def set_wowza_ownership():
         "chown",
         "-R",
         "-H",
-        "-v",
         f"{WOWZA_USER}:{WOWZA_USER}",
         WOWZA_DIR
     ], check=True)
@@ -183,7 +188,7 @@ def create_admin_user():
         print("Admin user already exists, skipping creation.")
         return
 
-    password = input("Enter Wowza admin password: ").strip()
+    password = getpass("Enter Wowza admin password: ")
     if not password:
         raise RuntimeError("Password cannot be empty")
 
@@ -200,6 +205,47 @@ def create_admin_user():
     ], check=True)
 
     print("Admin user created successfully.")
+
+
+def create_publish_user():
+    """
+    Create Wowza live stream publish user only if it doesn't exist.
+
+    Returns password of publish user.
+    """
+
+    path = os.path.join(WOWZA_DIR, "conf", "publish.password")
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing password file: {path}")
+
+    # 1. Try to find existing password
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            parts = line.split()
+
+            if len(parts) >= 2 and parts[0] == WOWZA_PUBLISH_USER:
+                print("Wowza publish user already exists.")
+                return parts[1]
+
+    print("Creating Wowza publish user...")
+
+    # 2. Not found → prompt user
+    password = getpass("Enter publish password: ")
+
+    if not password:
+        raise ValueError("Password cannot be empty")
+
+    # 3. Append new entry
+    with open(path, "a") as f:
+        f.write(f"{WOWZA_PUBLISH_USER} {password}\n")
+
+    return password
 
 
 def ensure_wowza_nofile_limits(user=WOWZA_USER, limit=20000):
@@ -224,6 +270,92 @@ def ensure_wowza_nofile_limits(user=WOWZA_USER, limit=20000):
     os.chmod(LIMITS_FILE, 0o644)
 
     print("Limits file created successfully.")
+
+
+def update_storage_dir():
+    """
+    Update StorageDir in all Application.xml files under Wowza conf directory.
+    Creates timestamped backups only for modified files.
+    """
+
+    default_content_dir = "${com.wowza.wms.context.VHostConfigHome}/content"
+    old_line = f"<StorageDir>{default_content_dir}</StorageDir>"
+    new_line = f"<StorageDir>{WOWZA_CONTENT_DIR}</StorageDir>"
+
+    conf_dir = os.path.join(WOWZA_DIR, "conf")
+
+    updated_any = False
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for root, _, files in os.walk(conf_dir):
+        for name in files:
+            if name != "Application.xml":
+                continue
+
+            path = os.path.join(root, name)
+
+            with open(path, "r") as f:
+                content = f.read()
+
+            if old_line not in content:
+                print(f"Default StorageDir not found in {path}, skipping.")
+                continue
+
+            new_content = content.replace(old_line, new_line)
+
+            if new_content == content:
+                print(f"StorageDir already set in {path}, skipping.")
+                continue
+
+            backup_path = f"{path}.{timestamp}.bak"
+            shutil.copy2(path, backup_path)
+            print(f"Backup created: {backup_path}")
+
+            with open(path, "w") as f:
+                f.write(new_content)
+
+            print(f"Updated StorageDir in: {path}")
+            updated_any = True
+
+    if not updated_any:
+        print("No Application.xml files required updates.")
+    else:
+        print("StorageDir update completed.")
+
+
+def copy_wowza_content():
+    """
+    Recursively copy WOWZA_DIR/content to WOWZA_CONTENT_DIR
+    without overwriting existing files.
+    """
+
+    src = os.path.join(WOWZA_DIR, "content")
+    dst = WOWZA_CONTENT_DIR
+
+    print(f"Copying content from {src} -> {dst}")
+
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"Source directory not found: {src}")
+
+    for root, dirs, files in os.walk(src):
+        rel_path = os.path.relpath(root, src)
+        target_root = os.path.join(dst, rel_path) if rel_path != "." else dst
+
+        os.makedirs(target_root, exist_ok=True)
+
+        for name in files:
+            src_file = os.path.join(root, name)
+            dst_file = os.path.join(target_root, name)
+
+            # skip if already exists
+            if os.path.exists(dst_file):
+                print(f"Skipping existing file: {dst_file}")
+                continue
+
+            shutil.copy2(src_file, dst_file)
+            print(f"Copied: {src_file} -> {dst_file}")
+
+    print("Content copy completed.")
 
 
 # ---------------------------
@@ -283,7 +415,7 @@ def wait_for_ports(timeout=30):
 # playback readiness
 # ---------------------------
 
-def start_test_stream():
+def start_test_stream(publish_pass):
     """
     Starts a short FFmpeg test stream to Wowza.
     Returns the subprocess handle.
@@ -299,21 +431,21 @@ def start_test_stream():
         "-c:a", "aac",
         "-t", "20",
         "-f", "flv",
-        "rtmp://publish:publish@127.0.0.1/live/test",
+        f"rtmp://{WOWZA_PUBLISH_USER}:{publish_pass}@127.0.0.1/live/test",
     ]
 
     env = os.environ.copy()
     env["PATH"] = "/usr/local/bin:" + env["PATH"]
 
     print("Starting FFmpeg test stream...")
-    print(" ".join(cmd))
-    print(env["PATH"])
+    print("Running command", " ".join(cmd))
 
     return subprocess.Popen(
         cmd,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
     )
 
 
@@ -349,20 +481,30 @@ def check_playback_readiness(
     raise RuntimeError("Playback NOT ready (HLS not available)")
 
 
-def run_playback_test():
+def run_playback_test(publish_pass):
     """
     Runs full end-to-end playback test:
     starts FFmpeg → waits → validates HLS → stops FFmpeg
     """
-    proc = start_test_stream()
+    proc = start_test_stream(publish_pass)
 
     try:
         time.sleep(3)  # give Wowza time to start ingest
         check_playback_readiness()
     finally:
         print("Stopping FFmpeg test stream...")
-        proc.terminate()
-        proc.wait()
+        try:
+            # proc.terminate()
+            proc.send_signal(signal.SIGINT)
+            stdout, stderr = proc.communicate(timeout=5)
+        except Exception:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+
+        if proc.returncode not in (0, 255, None):
+            print(f"\nFFmpeg return code: {proc.returncode}")
+            print("FFmpeg error output:")
+            print(stderr)
 
 
 # ---------------------------
@@ -384,11 +526,17 @@ def main():
 
     ensure_wowza_nofile_limits()
 
+    update_storage_dir()
+
     install_wowza_license()
 
     create_admin_user()
 
+    publish_pass = create_publish_user()
+
     set_wowza_ownership()
+
+    copy_wowza_content()
 
     found = find_services()
 
@@ -417,7 +565,7 @@ def main():
 
     wait_for_ports()
 
-    run_playback_test()
+    run_playback_test(publish_pass)
 
     print("\n=== Wowza Bootstrap Complete ===")
 
