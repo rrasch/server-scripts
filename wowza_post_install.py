@@ -371,7 +371,7 @@ def get_current_tuning():
     try:
         response = requests.get(
             API_URL,
-            auth=("admin", "admin"),
+            auth=(WOWZA_ADMIN_USER, "admin"),
             headers=API_HEADERS,
         )
         response.raise_for_status()  # Raises an error for bad status codes
@@ -391,7 +391,7 @@ def enable_production_mode():
     try:
         response = requests.put(
             API_URL,
-            auth=("admin", "admin"),
+            auth=(WOWZA_ADMIN_USER, "admin"),
             headers=API_HEADERS,
             json=payload,
         )
