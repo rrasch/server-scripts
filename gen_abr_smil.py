@@ -11,7 +11,7 @@ from lxml import etree as ET
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
 
-BASENAME_RE = re.compile(r'_(\d+)k.*\.mp4$')
+BASENAME_RE = re.compile(r"_(\d+)k.*\.mp4$")
 
 
 def derive_basename(filepath: str):
@@ -30,7 +30,7 @@ def derive_basename(filepath: str):
     match = BASENAME_RE.search(filepath)
     if not match:
         return None
-    return filepath[:match.start()]
+    return filepath[: match.start()]
 
 
 def run_ffprobe(filepath: str) -> dict:
@@ -51,11 +51,13 @@ def run_ffprobe(filepath: str) -> dict:
     """
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-print_format", "json",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
         "-show_streams",
         "-show_format",
-        filepath
+        filepath,
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -309,7 +311,7 @@ def main():
 
     Generates one SMIL file per detected ABR group.
     """
-    check_ffprobe_available()    
+    check_ffprobe_available()
 
     parser = argparse.ArgumentParser(
         description="Generate Wowza SMIL files from directory or basename"
