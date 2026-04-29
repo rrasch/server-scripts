@@ -336,6 +336,12 @@ def copy_wowza_content():
     if not os.path.exists(src):
         raise FileNotFoundError(f"Source directory not found: {src}")
 
+    if not os.path.exists(dst):
+        raise FileNotFoundError(f"Destination directory does not exist: {dst}")
+
+    if not os.path.isdir(dst):
+        raise NotADirectoryError(f"Destination is not a directory: {dst}")
+
     if not os.access(dst, os.W_OK):
         print(f"Destination is read-only, skipping copy: {dst}")
         return
