@@ -78,7 +78,7 @@ http://<wowza-host>:1935/<application>/_definst_/mp4:<path>/<file>.mp4/playlist.
 
 ```
 http://<wowza-host>:1935/vod/_definst_/mp4:sample.mp4/playlist.m3u8
-http://<wowza-host>:1935/vod/_definst_/mp4:tamwag/rosie/9_JANE_TUCKER_REEL_3_3128k_s.mp4/playlist.m3u8
+http://<wowza-host>:1935/vod/_definst_/mp4:tamwag/rosie/9_JANE_TUCKER_REEL_3_3200k.mp4/playlist.m3u8
 ```
 
 Components:
