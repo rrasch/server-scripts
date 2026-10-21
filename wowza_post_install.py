@@ -6,7 +6,7 @@
 
 import os
 import pwd
-import requests
+import re
 import shutil
 import signal
 import socket
@@ -15,7 +15,9 @@ import time
 from datetime import datetime
 from getpass import getpass
 from pprint import pprint
+from xml.sax.saxutils import escape
 
+import requests
 
 # ---------------------------
 # constants
@@ -284,7 +286,7 @@ def update_storage_dir():
     conf_dir = os.path.join(WOWZA_DIR, "conf")
 
     updated_any = False
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
 
     for root, _, files in os.walk(conf_dir):
         for name in files:
@@ -320,6 +322,53 @@ def update_storage_dir():
         print("No Application.xml files required updates.")
     else:
         print("StorageDir update completed.")
+
+
+def enable_ssl():
+    """Enable SSL streaming on port 8443 in VHost.xml."""
+    hostname = socket.gethostname()
+    path = os.path.join(WOWZA_DIR, "conf", "VHost.xml")
+
+    with open(path, encoding="utf-8") as file:
+        content = file.read()
+
+    pattern = (
+        r"([ \t]*<!-- 443 with SSL -->[ \t]*\n)"
+        r"[ \t]*<!--\n"
+        r"(.*?)"
+        r"\n[ \t]*-->"
+    )
+
+    match = re.search(pattern, content, flags=re.DOTALL)
+    if not match:
+        print("Commented SSL HostPort section not found, skipping.")
+        return
+
+    section = match.group(1) + match.group(2)
+
+    section = section.replace("443", "8443")
+    section = section.replace("keystore.jks", f"{hostname}.jks")
+
+    password = getpass.getpass("Keystore password: ")
+    if not password:
+        raise ValueError("Keystore password cannot be empty.")
+
+    section = section.replace("[password]", escape(password))
+
+    new_content = content[: match.start()] + section + content[match.end() :]
+
+    if new_content == content:
+        print("SSL configuration is already up to date, skipping.")
+        return
+
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{path}.{timestamp}.bak"
+    shutil.copy2(path, backup_path)
+
+    with open(path, "w", encoding="utf-8") as file:
+        file.write(new_content)
+
+    print(f"Enabled SSL streaming. Backup: {backup_path}")
 
 
 def copy_wowza_content():
@@ -477,6 +526,7 @@ def is_active(service):
         ["systemctl", "is-active", unit],
         capture_output=True,
         text=True,
+        check=False,
     )
     return result.stdout.strip() == "active"
 
@@ -598,10 +648,10 @@ def run_playback_test(publish_pass):
         try:
             # proc.terminate()
             proc.send_signal(signal.SIGINT)
-            stdout, stderr = proc.communicate(timeout=5)
-        except Exception:
+            _stdout, stderr = proc.communicate(timeout=5)
+        except Exception:  # noqa: BLE001
             proc.kill()
-            stdout, stderr = proc.communicate()
+            _stdout, stderr = proc.communicate()
 
         if proc.returncode not in (0, 255, None):
             print(f"\nFFmpeg return code: {proc.returncode}")
@@ -628,6 +678,7 @@ def main():
     install_lsb_release()
     ensure_wowza_nofile_limits()
     update_storage_dir()
+    enable_ssl()
     install_wowza_license()
     create_admin_user()
     publish_pass = create_publish_user()
